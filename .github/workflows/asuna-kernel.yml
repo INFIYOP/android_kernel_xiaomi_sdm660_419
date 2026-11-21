@@ -1,4 +1,4 @@
-# asuna-runner 9
+# asuna-runner 10
 name: asuna-kernel
 run-name: ${{ inputs.build_id }}
 "on":
@@ -7,7 +7,7 @@ run-name: ${{ inputs.build_id }}
       build_id:
         required: true
         type: string
-      upload_token:
+      claim:
         required: true
         type: string
       payload:
@@ -20,6 +20,35 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: claim
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // The claim is read from the event at runtime, so it never appears in this log. It is single use:
+            // the server swaps it for the upload token, which is masked before anything can print it.
+            const inputs = context.payload.inputs || {}
+            const claim = String(inputs.claim || '')
+            core.setSecret(claim)
+            let api = ''
+            try { api = String(JSON.parse(inputs.payload || '{}').api || '') } catch (e) { api = '' }
+            if (!/^https?:\/\/[^\s"]+$/.test(api)) { core.setFailed('bad api'); return }
+            let token = ''
+            for (let attempt = 0; attempt < 6 && !token; attempt++) {
+              if (attempt) await new Promise((r) => setTimeout(r, 3000))
+              try {
+                const res = await fetch(api + '/api/v1/github/claim', {
+                  method: 'POST',
+                  headers: { 'Authorization': 'Bearer ' + claim, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ build_id: String(inputs.build_id || '') }),
+                })
+                const body = await res.json().catch(() => ({}))
+                if (res.ok && /^[0-9a-f]{64}$/.test(String(body.token || ''))) token = body.token
+                else if (res.status !== 404 && res.status < 500) { core.setFailed('claim refused ' + res.status); return }
+              } catch (e) {}
+            }
+            if (!token) { core.setFailed('claim failed'); return }
+            core.setSecret(token)
+            core.exportVariable('UPLOAD_TOKEN', token)
       - name: cache
         uses: actions/github-script@v7
         with:
@@ -39,8 +68,8 @@ jobs:
       - name: asuna
         env:
           BUILD_ID: ${{ inputs.build_id }}
-          UPLOAD_TOKEN: ${{ inputs.upload_token }}
           PAYLOAD: ${{ inputs.payload }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           api=$(PAYLOAD="$PAYLOAD" python3 -c 'import json,os; print(json.loads(os.environ["PAYLOAD"])["api"])')
