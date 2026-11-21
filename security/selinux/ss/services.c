@@ -94,7 +94,7 @@ static int context_struct_to_string(struct policydb *policydb,
 				    char **scontext,
 				    u32 *scontext_len);
 
-static void context_struct_compute_av(struct policydb *policydb,
+void context_struct_compute_av(struct policydb *policydb,
 				      struct context *scontext,
 				      struct context *tcontext,
 				      u16 tclass,
@@ -454,7 +454,7 @@ static int dump_masked_av_helper(void *k, void *d, void *args)
 	return 0;
 }
 
-static void security_dump_masked_av(struct policydb *policydb,
+void security_dump_masked_av(struct policydb *policydb,
 				    struct context *scontext,
 				    struct context *tcontext,
 				    u16 tclass,
@@ -527,6 +527,20 @@ out:
 	kfree(scontext_name);
 
 	return;
+}
+#elif defined(CONFIG_KSU)
+/*
+ * KernelSU links against security_dump_masked_av() directly. Without
+ * CONFIG_AUDIT the real function is compiled out, so provide a no-op
+ * (matches what callers do when auditing is disabled).
+ */
+void security_dump_masked_av(struct policydb *policydb,
+			     struct context *scontext,
+			     struct context *tcontext,
+			     u16 tclass,
+			     u32 permissions,
+			     const char *reason)
+{
 }
 #endif
 
@@ -619,7 +633,7 @@ void services_compute_xperms_drivers(
  * Compute access vectors and extended permissions based on a context
  * structure pair for the permissions in a particular class.
  */
-static void context_struct_compute_av(struct policydb *policydb,
+void context_struct_compute_av(struct policydb *policydb,
 				      struct context *scontext,
 				      struct context *tcontext,
 				      u16 tclass,
