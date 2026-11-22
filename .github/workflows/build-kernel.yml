@@ -1,0 +1,232 @@
+name: build-kernel
+
+# Manual build with Neutron clang (clang + lld + Polly, LLVM=1).
+# Produces a flashable AnyKernel3 zip and the raw Image.gz-dtb.
+# Separate from asuna-kernel.yml, which is managed by the ASUNA build bot.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "arch/arm64/configs/vendor/<name>_defconfig"
+        required: true
+        default: tulip-perf
+        type: choice
+        options:
+          - tulip-perf
+          - whyred-perf
+          - lavender-perf
+          - wayne-perf
+          - wayne-old-perf
+          - wayne-oss-perf
+          - sdm660-perf
+          - sdm660-perf-full
+      lto:
+        description: "LTO mode (full LTO needs a lot of RAM at link time; fall back to thin if the job is OOM-killed)"
+        required: true
+        default: defconfig
+        type: choice
+        options:
+          - defconfig
+          - thin
+          - none
+      neutron_tag:
+        description: "Neutron clang release tag (empty = latest)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kernel-${{ github.ref }}-${{ inputs.defconfig }}
+  cancel-in-progress: true
+
+env:
+  KARGS: >-
+    ARCH=arm64 LLVM=1 LLVM_IAS=1
+    CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+    OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+    CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+    CLANG_TRIPLE=aarch64-linux-gnu-
+    HOSTCC=gcc HOSTCXX=g++
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout (with the BakaSU submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Unshallow KernelSU
+        # BakaSU derives its version code from the submodule commit count,
+        # so a depth-1 submodule would produce a wrong (too low) version.
+        run: |
+          set -euo pipefail
+          if [ "$(git -C KernelSU rev-parse --is-shallow-repository)" = "true" ]; then
+            git -C KernelSU fetch --unshallow --tags
+          fi
+          echo "BakaSU commits: $(git -C KernelSU rev-list --count HEAD)"
+
+      - name: Free disk space and add swap
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /mnt/kernel.swap
+          sudo chmod 600 /mnt/kernel.swap
+          sudo mkswap /mnt/kernel.swap
+          sudo swapon /mnt/kernel.swap
+          free -h
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev cpio zip zstd lz4 xz-utils \
+            patchelf python3 curl ca-certificates make gcc g++
+
+      - name: Install Neutron clang
+        env:
+          NEUTRON_TAG: ${{ inputs.neutron_tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$NEUTRON_TAG" =~ ^[A-Za-z0-9._-]*$ ]]; then
+            echo "invalid neutron_tag" >&2; exit 1
+          fi
+          mkdir -p "$HOME/toolchains/neutron-clang"
+          cd "$HOME/toolchains/neutron-clang"
+          curl -fsSLo antman https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman
+          chmod +x antman
+          if [ -n "$NEUTRON_TAG" ]; then ./antman -S="$NEUTRON_TAG"; else ./antman -S; fi
+          # Older runner glibc/libstdc++ than the toolchain was built with:
+          if ! ./bin/clang --version >/dev/null 2>&1; then
+            ./antman --patch=glibc
+          fi
+          ./bin/clang --version
+          echo "$HOME/toolchains/neutron-clang/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+          LTO: ${{ inputs.lto }}
+        run: |
+          set -euo pipefail
+          [[ "$DEFCONFIG" =~ ^[A-Za-z0-9_-]+$ ]]
+          clang --version | head -1
+          make O=out $KARGS "vendor/${DEFCONFIG}_defconfig"
+          case "$LTO" in
+            thin) scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN ;;
+            none) scripts/config --file out/.config -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE ;;
+          esac
+          make O=out $KARGS olddefconfig
+          echo "---- resolved options ----"
+          grep -E '^CONFIG_(LTO[A-Z_]*|POLLY_CLANG|KSU|KSU_SUSFS|KSU_MANUAL_HOOK|ZRAM_DEF_COMP|DEFAULT_TCP_CONG|BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME)=' out/.config || true
+          # Guard: KernelSU without an active hook mode builds fine but root never works.
+          if grep -q '^CONFIG_KSU=y' out/.config \
+             && ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config \
+             && ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+            echo "CONFIG_KSU=y but no hook mode is enabled" >&2; exit 1
+          fi
+          # The source hooks are SUSFS inline hooks; manual-hook mode alone has none.
+          if grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config \
+             && ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+            echo "CONFIG_KSU_MANUAL_HOOK=y without CONFIG_KSU_SUSFS: hooks are compiled out" >&2; exit 1
+          fi
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          IMG=$(sed -n 's/^CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME="\(.*\)"/\1/p' out/.config)
+          IMG=${IMG:-Image.gz-dtb}
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+          START=$(date +%s)
+          make O=out $KARGS -j"$(nproc)" "$IMG" 2>&1 | tee build.log
+          echo "Build time: $(( $(date +%s) - START ))s"
+          ls -l "out/arch/arm64/boot/$IMG"
+
+      - name: Package (AnyKernel3)
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y%m%d)
+          case "$DEFCONFIG" in
+            tulip*)    DEVICES="tulip" ;;
+            whyred*)   DEVICES="whyred" ;;
+            lavender*) DEVICES="lavender" ;;
+            wayne*)    DEVICES="wayne jasmine_sprout" ;;
+            *)         DEVICES="" ;;
+          esac
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md ak3/modules ak3/patch ak3/ramdisk
+          cp "out/arch/arm64/boot/$IMG" ak3/
+          {
+            echo "properties() { '"
+            echo "kernel.string=${DEFCONFIG} ${SHA} ${DATE} (BakaSU + SUSFS)"
+            echo "do.devicecheck=$([ -n "$DEVICES" ] && echo 1 || echo 0)"
+            echo "do.modules=0"
+            echo "do.systemless=0"
+            echo "do.cleanup=1"
+            echo "do.cleanuponabort=0"
+            n=1; for d in $DEVICES; do echo "device.name${n}=${d}"; n=$((n+1)); done
+            echo "supported.versions="
+            echo "supported.patchlevels="
+            echo "supported.vendorpatchlevels="
+            echo "'; } # end properties"
+            cat <<'AKEOF'
+
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          } # end attributes
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          # keep the stock ramdisk untouched, only swap the kernel
+          split_boot;
+          flash_boot;
+          AKEOF
+          } > ak3/anykernel.sh
+          ZIP="kernel-${DEFCONFIG}-${SHA}-${DATE}.zip"
+          (cd ak3 && zip -r9 "../$ZIP" . -x '.git*')
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          cp out/.config "config-${DEFCONFIG}.txt"
+          {
+            echo "### ${DEFCONFIG}"
+            echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
+            echo "- compiler: $(clang --version | head -1)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ inputs.defconfig }}
+          path: |
+            ${{ env.ZIP }}
+            out/arch/arm64/boot/${{ env.IMG }}
+            config-${{ inputs.defconfig }}.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.defconfig }}
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
