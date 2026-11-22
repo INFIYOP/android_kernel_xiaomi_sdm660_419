@@ -2185,10 +2185,26 @@ static void zram_reset_device(struct zram *zram)
 	up_write(&zram->init_lock);
 }
 
+/*
+ * zram may never be larger than half of physical RAM (4 GB device -> 2 GB,
+ * 3 GB -> 1.5 GB, 6 GB -> 3 GB). More than that makes reclaim burn CPU
+ * compressing pages and the device lags instead of getting more usable memory.
+ *
+ * totalram_pages() excludes firmware/kernel reserved memory (a "4 GB" phone
+ * reports ~3.6 GB), so round the RAM size up to whole GB before halving.
+ */
+static u64 zram_max_disksize(void)
+{
+	u64 ram = (u64)totalram_pages() << PAGE_SHIFT;
+	u64 ram_gb = (ram + SZ_1G - 1) >> 30;
+
+	return ram_gb << 29;
+}
+
 static ssize_t disksize_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
-	u64 disksize;
+	u64 disksize, max_disksize;
 	struct zcomp *comp;
 	struct zram *zram = dev_to_zram(dev);
 	int err;
@@ -2199,6 +2215,13 @@ static ssize_t disksize_store(struct device *dev,
 
 	else
 		disksize = (u64)SZ_1G * 2;
+
+	max_disksize = zram_max_disksize();
+	if (disksize > max_disksize) {
+		pr_warn("zram: %llu MB is more than half of RAM, limiting to %llu MB\n",
+			disksize >> 20, max_disksize >> 20);
+		disksize = max_disksize;
+	}
 
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
