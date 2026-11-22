@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
+#include <linux/wakeup_reason.h>
 
 #include "internals.h"
 
@@ -20,6 +21,7 @@ bool irq_pm_check_wakeup(struct irq_desc *desc)
 		desc->istate |= IRQS_SUSPENDED | IRQS_PENDING;
 		desc->depth++;
 		irq_disable(desc);
+		log_irq_wakeup_reason(irq_desc_get_irq(desc));
 		pm_system_irq_wakeup(irq_desc_get_irq(desc));
 		return true;
 	}

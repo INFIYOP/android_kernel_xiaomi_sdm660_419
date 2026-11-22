@@ -7,7 +7,8 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 
-int msm_show_resume_irq_mask;
+/* On by default: only prints once per resume, and is the only way to see what woke the SoC. */
+int msm_show_resume_irq_mask = 1;
 
 module_param_named(
 	debug_mask, msm_show_resume_irq_mask, int, 0664);
