@@ -35,9 +35,14 @@ name: build-kernel
         required: false
         default: ""
         type: string
+      release:
+        description: "Publish the zip as a GitHub (pre-)release"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write   # needed only for the release step
 
 concurrency:
   group: build-kernel-${{ github.ref }}-${{ inputs.defconfig }}
@@ -221,6 +226,30 @@ jobs:
             config-${{ inputs.defconfig }}.txt
           retention-days: 14
           if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y%m%d)
+          TAG="build-${DEFCONFIG}-${DATE}-${SHA}"
+          cp "out/arch/arm64/boot/$IMG" "$IMG"
+          sha256sum "$ZIP" "$IMG" "config-${DEFCONFIG}.txt" > sha256sums.txt
+          {
+            echo "Automated build of \`${DEFCONFIG}\` at ${SHA} (BakaSU + SUSFS)."
+            echo
+            echo "- compiler: $(clang --version | head -1)"
+            grep -E '^CONFIG_(LTO_CLANG_[A-Z]+|POLLY_CLANG|ZRAM_DEF_COMP|DEFAULT_TCP_CONG)=' out/.config | sed 's/^/- /'
+            echo
+            echo "Flash the zip in recovery. Not boot-tested by CI."
+          } > notes.md
+          gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
+            --title "${DEFCONFIG} ${DATE} (${SHA})" --notes-file notes.md \
+            "$ZIP" "$IMG" "config-${DEFCONFIG}.txt" sha256sums.txt
 
       - name: Upload build log on failure
         if: failure()
