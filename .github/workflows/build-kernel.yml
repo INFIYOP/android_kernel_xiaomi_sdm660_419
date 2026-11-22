@@ -8,7 +8,7 @@ name: build-kernel
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "arch/arm64/configs/vendor/<name>_defconfig"
+        description: "arch/arm64/configs/vendor/<name>_defconfig (tulip/whyred are the tested ones; sdm660-perf is left out because it does not build)"
         required: true
         default: tulip-perf
         type: choice
@@ -19,8 +19,6 @@ name: build-kernel
           - wayne-perf
           - wayne-old-perf
           - wayne-oss-perf
-          - sdm660-perf
-          - sdm660-perf-full
       lto:
         description: "LTO mode (full LTO needs a lot of RAM at link time; fall back to thin if the job is OOM-killed)"
         required: true
