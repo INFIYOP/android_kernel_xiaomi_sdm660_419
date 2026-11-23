@@ -852,6 +852,31 @@ void pm_get_active_wakeup_sources(char *pending_wakeup_source, size_t max)
 }
 EXPORT_SYMBOL_GPL(pm_get_active_wakeup_sources);
 
+/**
+ * pm_log_wakeup_sources_since - log wakeup sources touched since @since
+ * @since: monotonic time (ktime_get()) to compare ws->last_time against
+ *
+ * Used when a resume has no IRQ attributed to it, so the wake can still be
+ * traced to the wakeup source that was signalled. Prints at most 8 names.
+ */
+void pm_log_wakeup_sources_since(ktime_t since)
+{
+	struct wakeup_source *ws;
+	int srcuidx, n = 0;
+
+	srcuidx = srcu_read_lock(&wakeup_srcu);
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ktime_compare(ws->last_time, since) < 0)
+			continue;
+		if (n++ < 8)
+			pr_info("Resume wakeup source: %s%s\n", ws->name,
+				ws->active ? " (still active)" : "");
+	}
+	srcu_read_unlock(&wakeup_srcu, srcuidx);
+	if (n > 8)
+		pr_info("Resume wakeup source: ... and %d more\n", n - 8);
+}
+
 void pm_print_active_wakeup_sources(void)
 {
 	struct wakeup_source *ws;

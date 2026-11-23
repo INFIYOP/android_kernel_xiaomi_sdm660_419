@@ -24,6 +24,7 @@
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/cpu_pm.h>
+#include <linux/wakeup_reason.h>
 #include <asm/arch_timer.h>
 #include <soc/qcom/rpm-notifier.h>
 #include <soc/qcom/lpm_levels.h>
@@ -505,6 +506,16 @@ static irqreturn_t msm_mpm_irq(int irq, void *dev_id)
 			apps_irq = mpm_to_irq[mpm_irq];
 			desc = apps_irq ?
 				irq_to_desc(apps_irq) : NULL;
+
+			if (apps_irq) {
+				/* Tell the wakeup-reason log which line woke us */
+				log_threaded_irq_wakeup_reason(apps_irq, irq);
+				pr_info("wake: mpm irq %u -> irq %d (%s)\n",
+					mpm_irq, apps_irq,
+					(desc && desc->action &&
+					 desc->action->name) ?
+					desc->action->name : "(unnamed)");
+			}
 
 			if (desc && !irqd_is_level_type(&desc->irq_data))
 				irq_set_irqchip_state(apps_irq,
