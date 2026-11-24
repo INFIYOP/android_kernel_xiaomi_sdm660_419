@@ -63,6 +63,20 @@ static void cluster_prepare(struct lpm_cluster *cluster,
 static bool print_parsed_dt;
 module_param_named(print_parsed_dt, print_parsed_dt, bool, 0664);
 
+/*
+ * Runtime (awake) idle used to be WFI only, so CPUs never reached retention
+ * or power collapse unless the whole system suspended. deep_idle opts in to
+ * the levels described in the device tree:
+ *   0 - WFI only (default, previous behaviour)
+ *   1 - CPU retention/power collapse and cluster levels that do not involve
+ *       the RPM
+ *   2 - additionally allow cluster levels that notify the RPM (VDD min)
+ * Can be changed at runtime:
+ *   /sys/module/lpm_levels/parameters/deep_idle
+ */
+static unsigned int lpm_deep_idle;
+module_param_named(deep_idle, lpm_deep_idle, uint, 0664);
+
 /**
  * msm_cpuidle_get_deep_idle_latency - Get deep idle latency value
  *
@@ -187,6 +201,9 @@ static int cluster_select(struct lpm_cluster *cluster, bool from_idle)
 			break;
 
 		if (suspend_in_progress && from_idle && level->notify_rpm)
+			continue;
+
+		if (from_idle && level->notify_rpm && !(lpm_deep_idle & 2))
 			continue;
 
 		if (level->notify_rpm) {
@@ -455,21 +472,77 @@ static int psci_enter_sleep(struct lpm_cpu *cpu, int idx, bool from_idle)
 static int lpm_cpuidle_select(struct cpuidle_driver *drv,
 		struct cpuidle_device *dev, bool *stop_tick)
 {
+	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
+	s64 duration_ns = 0;
+	u32 sleep_us, latency_us;
+	struct cpumask mask;
+	int i, best = 0;
+
 #ifdef CONFIG_NO_HZ_COMMON
 	ktime_t delta_next;
-	s64 duration_ns = tick_nohz_get_sleep_length(&delta_next);
+
+	duration_ns = tick_nohz_get_sleep_length(&delta_next);
 
 	if (duration_ns <= TICK_NSEC)
 		*stop_tick = false;
 #endif
 
-	return 0;
+	if (!(lpm_deep_idle & 3) || !cpu || duration_ns <= 0)
+		return 0;
+
+	sleep_us = (u32)min_t(s64, duration_ns / NSEC_PER_USEC, U32_MAX);
+	cpumask_clear(&mask);
+	cpumask_set_cpu(dev->cpu, &mask);
+	latency_us = pm_qos_request_for_cpumask(PM_QOS_CPU_DMA_LATENCY, &mask);
+
+	/* Levels are ordered shallow to deep: take the deepest that fits */
+	for (i = 1; i < cpu->nlevels; i++) {
+		const struct power_params *pwr = &cpu->levels[i].pwr;
+
+		if (!lpm_cpu_mode_allow(dev->cpu, i, true))
+			continue;
+		if (latency_us <= pwr->exit_latency)
+			break;
+		if (sleep_us < pwr->exit_latency + pwr->entry_latency ||
+		    sleep_us < pwr->min_residency)
+			break;
+		best = i;
+	}
+
+	return best;
 }
 
 static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 		struct cpuidle_driver *drv, int idx)
 {
-	wfi();
+	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
+	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
+	u64 start_time, end_time;
+	bool success = false;
+
+	if (!idx || !(lpm_deep_idle & 3) || !cpu) {
+		wfi();
+		return idx;
+	}
+
+	start_time = ktime_to_ns(ktime_get());
+
+	cpu_prepare(cpu, idx, true);
+	cluster_prepare(cpu->parent, cpumask, idx, true, start_time);
+
+	if (need_resched())
+		goto exit;
+
+	/* psci_enter_sleep() returns 1 when the state was entered, <= 0 if not */
+	success = psci_enter_sleep(cpu, idx, true) > 0;
+	if (!success)
+		wfi();	/* could not enter the state: at least idle the core */
+exit:
+	end_time = ktime_to_ns(ktime_get());
+
+	cluster_unprepare(cpu->parent, cpumask, idx, true, end_time, success);
+	cpu_unprepare(cpu, idx, true);
+	local_irq_enable();
 
 	return idx;
 }
