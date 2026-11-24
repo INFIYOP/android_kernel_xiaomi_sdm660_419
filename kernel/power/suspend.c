@@ -377,7 +377,8 @@ static int suspend_prepare(suspend_state_t state)
 	if (!error)
 		return 0;
 
-	log_suspend_abort_reason("One or more tasks refusing to freeze");
+	/* process.c has already logged whether this was a wakeup or a stuck task */
+	log_suspend_abort_reason("Freezing tasks failed or aborted by a pending wakeup");
 	suspend_stats.failed_freeze++;
 	dpm_save_failed_step(SUSPEND_FREEZE);
  Finish:
@@ -519,7 +520,13 @@ int suspend_devices_and_enter(suspend_state_t state)
 	suspend_test_start();
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
-		pr_debug("Some devices failed to suspend, or early wake event detected\n");
+		/*
+		 * A driver that really fails prints "PM: Device X failed to
+		 * suspend" itself; -EBUSY with no such line is an early wake.
+		 */
+		pr_info("PM: dpm_suspend_start() failed: %d (%s)\n", error,
+			error == -EBUSY ? "early wake event, no device error" :
+					  "device suspend error, see log above");
 		log_suspend_abort_reason(
 				"Some devices failed to suspend, or early wake event detected");
 		goto Recover_platform;

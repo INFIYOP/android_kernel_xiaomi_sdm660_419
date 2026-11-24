@@ -3584,7 +3584,15 @@ static int msm_hs_probe(struct platform_device *pdev)
 			pdata->bam_tx_ep_pipe_index;
 	msm_uport->bam_rx_ep_pipe_index =
 			pdata->bam_rx_ep_pipe_index;
-	msm_uport->wakeup.enabled = true;
+	/*
+	 * Same state msm_hs_shutdown() leaves behind: the wakeup IRQ is not
+	 * requested until msm_hs_startup(), so the first runtime resume (done
+	 * from startup, before request_irq(uport->irq)) must not try to
+	 * "disable the wakeup IRQ and enable the UART IRQ" - that enabled an
+	 * IRQ with no action and triggered the irq_startup() WARN.
+	 */
+	msm_uport->wakeup.enabled = false;
+	msm_uport->wakeup.freed = true;
 
 	uport->iotype = UPIO_MEM;
 	uport->fifosize = 64;

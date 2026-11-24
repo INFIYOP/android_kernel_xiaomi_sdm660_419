@@ -930,7 +930,7 @@ bool pm_wakeup_pending(void)
 	if (ret) {
 		pm_get_active_wakeup_sources(suspend_abort,
 					     MAX_SUSPEND_ABORT_LEN);
-		pr_debug("PM: %s\n", suspend_abort);
+		pr_info("PM: suspend aborted, wakeup pending: %s\n", suspend_abort);
 	}
 
 	return ret || atomic_read(&pm_abort_suspend) > 0;

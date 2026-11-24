@@ -73,9 +73,53 @@ module_param_named(print_parsed_dt, print_parsed_dt, bool, 0664);
  *   2 - additionally allow cluster levels that notify the RPM (VDD min)
  * Can be changed at runtime:
  *   /sys/module/lpm_levels/parameters/deep_idle
+ * Note: with deep_idle == 0 the cpuidle core (TEO) still counts time in
+ * C2/C3 even though only WFI ran. Read deep_idle_stats (below) to see what
+ * the hardware was really asked to do.
  */
 static unsigned int lpm_deep_idle;
 module_param_named(deep_idle, lpm_deep_idle, uint, 0664);
+
+/*
+ * What deep_idle really did, per CPU and level. The cpuidle core counts the
+ * state a driver returns, and (default governor TEO) it also counts C2/C3 when
+ * only WFI ran, so /sys/devices/system/cpu/cpuN/cpuidle/ cannot be trusted
+ * to show whether power collapse happened. This can:
+ *   /sys/module/lpm_levels/parameters/deep_idle_stats
+ * ok     = PSCI really entered the level and the CPU woke from it
+ * fail   = PSCI refused (or broadcast timer unavailable); WFI was used
+ * resched= a task became runnable while preparing; nothing was entered
+ */
+#define LPM_STAT_LEVELS	4
+struct lpm_deep_stat {
+	unsigned long ok[LPM_STAT_LEVELS];
+	unsigned long fail[LPM_STAT_LEVELS];
+	unsigned long resched[LPM_STAT_LEVELS];
+};
+static DEFINE_PER_CPU(struct lpm_deep_stat, lpm_deep_stats);
+
+static int lpm_deep_stats_get(char *buf, const struct kernel_param *kp)
+{
+	int cpu, i, len = 0;
+
+	for_each_possible_cpu(cpu) {
+		struct lpm_deep_stat *st = &per_cpu(lpm_deep_stats, cpu);
+
+		len += scnprintf(buf + len, PAGE_SIZE - len, "cpu%d", cpu);
+		for (i = 1; i < LPM_STAT_LEVELS; i++)
+			len += scnprintf(buf + len, PAGE_SIZE - len,
+					 " C%d ok=%lu fail=%lu resched=%lu |", i,
+					 st->ok[i], st->fail[i],
+					 st->resched[i]);
+		len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
+	}
+	return len;
+}
+
+static const struct kernel_param_ops lpm_deep_stats_ops = {
+	.get = lpm_deep_stats_get,
+};
+module_param_cb(deep_idle_stats, &lpm_deep_stats_ops, NULL, 0444);
 
 /**
  * msm_cpuidle_get_deep_idle_latency - Get deep idle latency value
@@ -495,17 +539,22 @@ static int lpm_cpuidle_select(struct cpuidle_driver *drv,
 	cpumask_set_cpu(dev->cpu, &mask);
 	latency_us = pm_qos_request_for_cpumask(PM_QOS_CPU_DMA_LATENCY, &mask);
 
-	/* Levels are ordered shallow to deep: take the deepest that fits */
+	/*
+	 * Deepest level that fits. Same rules as cluster_select(): a PM QoS
+	 * latency request equal to the exit latency already excludes the level.
+	 * "continue" rather than "break" so the result does not depend on the
+	 * DT listing levels in increasing latency order.
+	 */
 	for (i = 1; i < cpu->nlevels; i++) {
 		const struct power_params *pwr = &cpu->levels[i].pwr;
 
 		if (!lpm_cpu_mode_allow(dev->cpu, i, true))
 			continue;
 		if (latency_us <= pwr->exit_latency)
-			break;
+			continue;
 		if (sleep_us < pwr->exit_latency + pwr->entry_latency ||
 		    sleep_us < pwr->min_residency)
-			break;
+			continue;
 		best = i;
 	}
 
@@ -517,10 +566,18 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 {
 	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
 	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
+	struct lpm_deep_stat *stat = this_cpu_ptr(&lpm_deep_stats);
+	int lvl = min(idx, LPM_STAT_LEVELS - 1);
 	u64 start_time, end_time;
 	bool success = false;
 
-	if (!idx || !(lpm_deep_idle & 3) || !cpu) {
+	/*
+	 * The active governor is whatever cpuidle selected (TEO has a higher
+	 * rating than "qcom" here), so idx comes from it and may name a level
+	 * the lpm sysfs switches have disabled: honour those.
+	 */
+	if (!idx || !(lpm_deep_idle & 3) || !cpu ||
+	    !lpm_cpu_mode_allow(dev->cpu, idx, true)) {
 		wfi();
 		return idx;
 	}
@@ -530,13 +587,19 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 	cpu_prepare(cpu, idx, true);
 	cluster_prepare(cpu->parent, cpumask, idx, true, start_time);
 
-	if (need_resched())
+	if (need_resched()) {
+		stat->resched[lvl]++;
 		goto exit;
+	}
 
 	/* psci_enter_sleep() returns 1 when the state was entered, <= 0 if not */
 	success = psci_enter_sleep(cpu, idx, true) > 0;
-	if (!success)
+	if (success) {
+		stat->ok[lvl]++;
+	} else {
+		stat->fail[lvl]++;
 		wfi();	/* could not enter the state: at least idle the core */
+	}
 exit:
 	end_time = ktime_to_ns(ktime_get());
 
@@ -544,7 +607,8 @@ exit:
 	cpu_unprepare(cpu, idx, true);
 	local_irq_enable();
 
-	return idx;
+	/* Report the state that really ran so cpuidle's own counters stay true */
+	return success ? idx : 0;
 }
 
 static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
