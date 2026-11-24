@@ -736,6 +736,18 @@ static int msm_rpm_flush_requests(bool print)
 		if (!s->valid)
 			continue;
 
+		/*
+		 * Stop only when there really is a 25th request. Checking after
+		 * sending reported exactly 24 as an error although everything
+		 * had been sent.
+		 */
+		if (count >= MAX_WAIT_ON_ACK) {
+			if (irqs_disabled())
+				pr_err("Error: more than %d requests are buffered\n",
+							MAX_WAIT_ON_ACK);
+			return -ENOSPC;
+		}
+
 		set_msg_id(s->buf, msm_rpm_get_next_msg_id());
 
 		ret = msm_rpm_trysend_smd_buffer(s->buf, get_buf_len(s->buf));
@@ -745,19 +757,13 @@ static int msm_rpm_flush_requests(bool print)
 
 		s->valid = false;
 		count++;
-
 		/*
-		 * RPM acks need to be handled here if we have sent 24
-		 * messages such that we do not overrun SMD buffer. Since
-		 * we expect only sleep sets at this point (RPM PC would be
-		 * disallowed if we had pending active requests), we need not
-		 * process these sleep set acks.
+		 * RPM acks must be consumed after 24 sent messages so the SMD
+		 * buffer is not overrun. We only send sleep sets here and do
+		 * not process their acks ourselves, so we stop at the check
+		 * above and the next flush (before power collapse) sends the
+		 * rest.
 		 */
-		if (count >= MAX_WAIT_ON_ACK) {
-			pr_err("Error: more than %d requests are buffered\n",
-							MAX_WAIT_ON_ACK);
-			return -ENOSPC;
-		}
 	}
 	return 0;
 }
@@ -1516,6 +1522,11 @@ static int rpm_smd_pm_notifier(struct notifier_block *nb, unsigned long event, v
 	int ret;
 
 	if (event == PM_SUSPEND_PREPARE) {
+		/*
+		 * At most 24 sleep sets go out here; the remainder (if any)
+		 * is sent by msm_rpm_enter_sleep() right before power
+		 * collapse. -ENOSPC is therefore expected, not an error.
+		 */
 		ret = msm_rpm_flush_requests(false);
 		pr_debug("ret = %d\n", ret);
 	}

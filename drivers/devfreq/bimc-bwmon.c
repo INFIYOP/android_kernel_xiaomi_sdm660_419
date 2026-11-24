@@ -473,7 +473,9 @@ void set_zone_thres(struct bwmon *m, unsigned int sample_ms,
 	lo = 0;
 
 	if (unlikely((hi > m->thres_lim) || (med > hi) || (lo > med))) {
-		pr_warn("Zone thres larger than hw limit: hi:%u med:%u lo:%u\n",
+		/* hi == 0: governor has not programmed real values yet */
+		if (hi)
+			pr_warn("Zone thres larger than hw limit: hi:%u med:%u lo:%u\n",
 				hi, med, lo);
 		hi = min(hi, m->thres_lim);
 		/* hi/med can be 0 before the governor programs real values */
