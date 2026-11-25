@@ -956,7 +956,12 @@ void ipa_sps_irq_control_all(bool enable)
 		}
 		ep = &ipa_ctx->ep[ipa_ep_idx];
 		if (!ep->valid) {
-			IPAERR("EP (%d) not allocated.\n", ipa_ep_idx);
+			/*
+			 * Not every APPS_CONS pipe is connected on every
+			 * configuration, and this runs on every IPA clock
+			 * enable. Skipping an unconnected pipe is expected.
+			 */
+			IPADBG_LOW("EP (%d) not allocated.\n", ipa_ep_idx);
 			continue;
 		}
 		ipa_sps_irq_control(ep->sys, enable);
