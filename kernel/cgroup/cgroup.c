@@ -6469,6 +6469,13 @@ void cgroup_sk_clone(struct sock_cgroup_data *skcd)
 		 * Don't use cgroup_get_live().
 		 */
 		cgroup_get(sock_cgroup_ptr(skcd));
+		/*
+		 * cgroup_sk_free() drops a cgroup_bpf reference for every
+		 * socket, cloned ones included, so the clone must take one as
+		 * cgroup_sk_alloc() does. Without it the bpf refcnt is
+		 * over-put (percpu_ref ... <= 0 after switching to atomic).
+		 */
+		cgroup_bpf_get(sock_cgroup_ptr(skcd));
 	}
 }
 
