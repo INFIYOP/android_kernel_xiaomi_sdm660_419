@@ -841,7 +841,9 @@ int kgsl_pwrscale_init(struct device *dev, const char *governor)
 				NULL);
 
 		if (IS_ERR_OR_NULL(bus_devfreq))
-			dev_err(device->dev, "Bus scaling not enabled\n");
+			dev_err(device->dev,
+				"Bus scaling not enabled (opp table %d, devfreq %ld)\n",
+				ret, bus_devfreq ? PTR_ERR(bus_devfreq) : 0L);
 		else
 			pwrscale->gpu_profile.bus_devfreq = bus_devfreq;
 	}
