@@ -22,6 +22,10 @@
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/irqdesc.h>
+#include <linux/moduleparam.h>
+#include <linux/rcupdate.h>
+#include <linux/jump_label.h>
+#include <linux/mutex.h>
 
 #include "power.h"
 
@@ -562,8 +566,167 @@ static void wakeup_source_activate(struct wakeup_source *ws)
  * @ws: Wakeup source to report the event for.
  * @hard: If set, abort suspends in progress and wake up from suspend-to-idle.
  */
-static void wakeup_source_report_event(struct wakeup_source *ws, bool hard)
+/*
+ * Optional, default-off blocklist of wakeup sources, by exact name.
+ *
+ *   echo "name1;name2" > /sys/module/wakeup/parameters/blocked_wakeup_sources
+ *   echo "" > /sys/module/wakeup/parameters/blocked_wakeup_sources   (off)
+ *
+ * A blocked source simply never becomes active, so it cannot keep the system
+ * awake and it does not call pm_system_wakeup(). A source that is already
+ * active is never force-released; it ends normally. Interrupt wake-up from
+ * suspend is not affected, only the "stay awake until handled" window of the
+ * named source is dropped. Sources that calls, SMS, push, modems, WLAN, IPA,
+ * audio, timers and Android's own power service rely on are protected and
+ * cannot be listed.
+ */
+#define WS_BLOCK_MAX	16
+#define WS_BLOCK_LEN	64
+
+struct ws_blocklist {
+	struct rcu_head rcu;
+	int n;
+	char names[WS_BLOCK_MAX][WS_BLOCK_LEN];
+};
+
+static struct ws_blocklist __rcu *ws_blocklist;
+static DEFINE_STATIC_KEY_FALSE(ws_block_enabled);
+static DEFINE_MUTEX(ws_block_lock);
+static atomic_long_t ws_blocked_events = ATOMIC_LONG_INIT(0);
+
+static const char * const ws_block_protected[] = {
+	"PowerManager", "SuspendControl", "qcril", "radio", "netmgr", "iwlan",
+	"Apm", "alarmtimer", "[timerfd]", "eventpoll", "gpio_keys", "soc:",
+	"hall", "pon", "smp2p", "tftp", "rmt_storage", "modem", "pil-", "ssr",
+	"qmi", "wlan", "WLAN", "IPA", "ipa", "adsprpc", "bluetooth",
+	"hal_bluetooth", "sensor", "Sensor", "userspace-abort", "rtc", "alarm",
+};
+
+static bool ws_name_protected(const char *name)
 {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ws_block_protected); i++)
+		if (strstr(name, ws_block_protected[i]))
+			return true;
+	return false;
+}
+
+static bool ws_is_blocked(const struct wakeup_source *ws)
+{
+	struct ws_blocklist *bl;
+	bool hit = false;
+	int i;
+
+	if (!ws->name)
+		return false;
+	rcu_read_lock();
+	bl = rcu_dereference(ws_blocklist);
+	if (bl)
+		for (i = 0; i < bl->n; i++)
+			if (!strcmp(ws->name, bl->names[i])) {
+				hit = true;
+				break;
+			}
+	rcu_read_unlock();
+	return hit;
+}
+
+static int ws_block_set(const char *val, const struct kernel_param *kp)
+{
+	struct ws_blocklist *nl = NULL, *old;
+	char *buf, *cur, *tok;
+	int ret = 0;
+
+	buf = kstrdup(val, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	cur = strim(buf);
+
+	if (*cur) {
+		nl = kzalloc(sizeof(*nl), GFP_KERNEL);
+		if (!nl) {
+			kfree(buf);
+			return -ENOMEM;
+		}
+		while ((tok = strsep(&cur, ";")) != NULL) {
+			tok = strim(tok);
+			if (!*tok)
+				continue;
+			if (strlen(tok) >= WS_BLOCK_LEN || nl->n >= WS_BLOCK_MAX) {
+				ret = -E2BIG;
+				break;
+			}
+			if (ws_name_protected(tok)) {
+				pr_warn("PM: wakeup source '%s' is protected, not blocking\n",
+					tok);
+				ret = -EPERM;
+				break;
+			}
+			strscpy(nl->names[nl->n++], tok, WS_BLOCK_LEN);
+		}
+		if (ret || !nl->n) {
+			kfree(nl);
+			nl = NULL;
+		}
+	}
+	kfree(buf);
+	if (ret)
+		return ret;
+
+	mutex_lock(&ws_block_lock);
+	old = rcu_dereference_protected(ws_blocklist,
+					lockdep_is_held(&ws_block_lock));
+	rcu_assign_pointer(ws_blocklist, nl);
+	if (nl)
+		static_branch_enable(&ws_block_enabled);
+	else
+		static_branch_disable(&ws_block_enabled);
+	mutex_unlock(&ws_block_lock);
+	if (old)
+		kfree_rcu(old, rcu);
+	return 0;
+}
+
+static int ws_block_get(char *buffer, const struct kernel_param *kp)
+{
+	struct ws_blocklist *bl;
+	int i, len = 0;
+
+	rcu_read_lock();
+	bl = rcu_dereference(ws_blocklist);
+	if (bl)
+		for (i = 0; i < bl->n; i++)
+			len += scnprintf(buffer + len, PAGE_SIZE - len, "%s%s",
+					 i ? ";" : "", bl->names[i]);
+	rcu_read_unlock();
+	return len;
+}
+
+static const struct kernel_param_ops ws_block_ops = {
+	.set = ws_block_set,
+	.get = ws_block_get,
+};
+module_param_cb(blocked_wakeup_sources, &ws_block_ops, NULL, 0600);
+
+static int ws_blocked_events_get(char *buffer, const struct kernel_param *kp)
+{
+	return scnprintf(buffer, PAGE_SIZE, "%ld",
+			 atomic_long_read(&ws_blocked_events));
+}
+
+static const struct kernel_param_ops ws_blocked_events_ops = {
+	.get = ws_blocked_events_get,
+};
+module_param_cb(blocked_events, &ws_blocked_events_ops, NULL, 0400);
+
+static bool wakeup_source_report_event(struct wakeup_source *ws, bool hard)
+{
+	if (static_branch_unlikely(&ws_block_enabled) && ws_is_blocked(ws)) {
+		atomic_long_inc(&ws_blocked_events);
+		return false;
+	}
+
 	ws->event_count++;
 	/* This is racy, but the counter is approximate anyway. */
 	if (events_check_enabled)
@@ -574,6 +737,8 @@ static void wakeup_source_report_event(struct wakeup_source *ws, bool hard)
 
 	if (hard)
 		pm_system_wakeup();
+
+	return true;
 }
 
 /**
@@ -591,10 +756,12 @@ void __pm_stay_awake(struct wakeup_source *ws)
 
 	spin_lock_irqsave(&ws->lock, flags);
 
-	wakeup_source_report_event(ws, false);
+	if (!wakeup_source_report_event(ws, false))
+		goto unlock;
 	del_timer(&ws->timer);
 	ws->timer_expires = 0;
 
+unlock:
 	spin_unlock_irqrestore(&ws->lock, flags);
 }
 EXPORT_SYMBOL_GPL(__pm_stay_awake);
@@ -779,7 +946,8 @@ void pm_wakeup_ws_event(struct wakeup_source *ws, unsigned int msec, bool hard)
 
 	spin_lock_irqsave(&ws->lock, flags);
 
-	wakeup_source_report_event(ws, hard);
+	if (!wakeup_source_report_event(ws, hard))
+		goto unlock;
 
 	if (!msec) {
 		wakeup_source_deactivate(ws);
