@@ -48,7 +48,13 @@ struct st_susfs_sus_path_list {
 	struct st_susfs_sus_path                info;
 	char                                    target_pathname[SUSFS_MAX_LEN_PATHNAME];
 };
-#endif
+
+/* sus_path uid filter */
+struct st_susfs_sus_path_uid_filter {
+	char                                    app_strings[SUSFS_APP_STR_BUF_SIZE];
+	int                                     err;
+};
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 /* sus_mount */
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -155,7 +161,15 @@ struct st_susfs_sus_map {
 	char                                    target_pathname[SUSFS_MAX_LEN_PATHNAME];
 	int                                     err;
 };
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+
+/* getpriority uid filter */
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+struct st_susfs_priority_uid_filter {
+	char                                    app_strings[SUSFS_APP_STR_BUF_SIZE];
+	int                                     err;
+};
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 
 /* avc log spoofing */
 struct st_susfs_avc_log_spoofing {
@@ -188,7 +202,9 @@ struct st_susfs_version {
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 void susfs_add_sus_path(void __user **user_info);
 void susfs_add_sus_path_loop(void __user **user_info);
-#endif
+void susfs_set_sus_path_uid_filter(void __user **user_info);
+void susfs_parse_sus_path_app_strings(void);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 /* sus_mount */
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -225,7 +241,14 @@ void susfs_add_open_redirect(void __user **user_info);
 /* sus_map */
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 void susfs_add_sus_map(void __user **user_info);
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+
+/* getpriority uid filter */
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+void susfs_set_priority_uid_filter(void __user **user_info);
+void susfs_parse_priority_app_strings(void);
+bool susfs_is_priority_uid_filtered(uid_t uid);
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 
 void susfs_set_avc_log_spoofing(void __user **user_info);
 
