@@ -214,12 +214,29 @@ jobs:
             echo "- compiler: $(clang --version | head -1)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Package (Aroma installer, tulip only)
+        # Optional extra zip with OC/UC/UV/zram/energy-model options. It
+        # downloads a pinned third-party resource zip, so it must never be
+        # able to fail the build or the normal release.
+        if: ${{ startsWith(inputs.defconfig, 'tulip') }}
+        continue-on-error: true
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          AROMA_ZIP="${ZIP%.zip}-aroma.zip"
+          bash installer/make-aroma-zip.sh -i "out/arch/arm64/boot/$IMG" \
+            -o "$AROMA_ZIP" -n "SanKernel ${DEFCONFIG} ${SHA}"
+          echo "AROMA_ZIP=$AROMA_ZIP" >> "$GITHUB_ENV"
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ inputs.defconfig }}
           path: |
             ${{ env.ZIP }}
+            ${{ env.AROMA_ZIP }}
             out/arch/arm64/boot/${{ env.IMG }}
             config-${{ inputs.defconfig }}.txt
           retention-days: 14
@@ -236,7 +253,7 @@ jobs:
           DATE=$(date -u +%Y%m%d)
           TAG="build-${DEFCONFIG}-${DATE}-${SHA}"
           cp "out/arch/arm64/boot/$IMG" "$IMG"
-          sha256sum "$ZIP" "$IMG" "config-${DEFCONFIG}.txt" > sha256sums.txt
+          sha256sum "$ZIP" ${AROMA_ZIP:+"$AROMA_ZIP"} "$IMG" "config-${DEFCONFIG}.txt" > sha256sums.txt
           {
             echo "Automated build of \`${DEFCONFIG}\` at ${SHA} (BakaSU + SUSFS)."
             echo
@@ -244,10 +261,11 @@ jobs:
             grep -E '^CONFIG_(LTO_CLANG_[A-Z]+|POLLY_CLANG|ZRAM_DEF_COMP|DEFAULT_TCP_CONG)=' out/.config | sed 's/^/- /'
             echo
             echo "Flash the zip in recovery. Not boot-tested by CI."
+            [ -n "${AROMA_ZIP:-}" ] && echo "The -aroma zip adds an Aroma menu (CPU/GPU OC, UC, UV/OV, zram size)."
           } > notes.md
           gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
             --title "${DEFCONFIG} ${DATE} (${SHA})" --notes-file notes.md \
-            "$ZIP" "$IMG" "config-${DEFCONFIG}.txt" sha256sums.txt
+            "$ZIP" ${AROMA_ZIP:+"$AROMA_ZIP"} "$IMG" "config-${DEFCONFIG}.txt" sha256sums.txt
 
       - name: Upload build log on failure
         if: failure()

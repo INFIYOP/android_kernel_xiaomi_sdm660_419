@@ -989,15 +989,19 @@ static int adreno_of_get_pwrlevels(struct adreno_device *adreno_dev,
 
 	if (enable_gpuoc) {
 		node = of_find_node_by_name(parent, "qcom,gpu-pwrlevel-binsoc");
+		if (node)
+			dev_info(KGSL_DEVICE(adreno_dev)->dev,
+				"GPU OC: using the qcom,gpu-pwrlevel-binsoc table (speed bin %u)\n",
+				adreno_dev->speed_bin);
+		else
+			dev_warn(KGSL_DEVICE(adreno_dev)->dev,
+				"GPU OC requested but the dtb has no binsoc table, using the stock table\n");
+	} else {
+		node = NULL;
+	}
 
 	if (node == NULL)
 		node = of_find_node_by_name(parent, "qcom,gpu-pwrlevel-bins");
-
-	}
-
-	 else {
-		node = of_find_node_by_name(parent, "qcom,gpu-pwrlevel-bins");
-	}
 
 	if (node == NULL)
 		return adreno_of_get_legacy_pwrlevels(adreno_dev, parent);
