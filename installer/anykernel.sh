@@ -187,7 +187,7 @@ else
 fi
 
 if [ "$zram_size" -ne 7 ]; then
-  ui_print "- ZRAM is resized to $zram_size GB (the kernel caps it at half of RAM)!"
+  ui_print "- ZRAM is set to $zram_size GB!"
   patch_cmdline "zram.resize" "zram.resize=$zram_size"
 else
   patch_cmdline "zram.resize" ""

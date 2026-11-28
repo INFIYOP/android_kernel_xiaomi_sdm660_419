@@ -8,7 +8,7 @@ with a touch menu for the options this kernel already has built in:
 | CPU OC 2.2 / 2.4 GHz | `overclock.cpu=1/2` | kernel cmdline (`init/main.c`, `clk-cpu-osm-660.c`) |
 | GPU OC 630 MHz | `overclock.gpu=1` | cmdline, `qcom,gpu-pwrlevel-binsoc` in the dtb |
 | CPU UC 1.4 / 1.8 GHz | `underclock.cpu=1/2` | cmdline |
-| zram size 1-6 GB | `zram.resize=N` | cmdline (kernel still caps it at half of RAM) |
+| zram size 1-6 GB | `zram.resize=N` | cmdline; honoured as chosen. Without it the default is 2 GB, limited to half of RAM |
 | UV / OV per cluster | `qcom,custom-voltage-reduce/increase` | dtb patch (fdtput) |
 | EAS energy model | 1 = built-in CAF table (default, no change); 2-4 = kdrag0n / hypeartist | dtb patch |
 

@@ -80,6 +80,16 @@ sed -i \
   -e "s|^ini_set(\"kernel_author\".*|ini_set(\"kernel_author\",           \"INFIYOP\");|" \
   -e "s|^ini_set(\"kernel_date\".*|ini_set(\"kernel_date\",             \"$(date -u +%Y.%m.%d)\");|" \
   -e '/splash(/d' -e '/setvar("random_num"/d' "$cfg"
+# zram labels: the kernel honours an explicit size as chosen (its half-of-RAM
+# limit only applies to the default), so drop San's "Recommended/Overkill" tags
+sed -i \
+  -e 's|^\([[:space:]]*setvar("s_zram_s1",[[:space:]]*\)".*|\1"1GB");|' \
+  -e 's|^\([[:space:]]*setvar("s_zram_s2",[[:space:]]*\)".*|\1"2GB (Default, or half of RAM if that is less)");|' \
+  -e 's|^\([[:space:]]*setvar("s_zram_s3",[[:space:]]*\)".*|\1"3GB");|' \
+  -e 's|^\([[:space:]]*setvar("s_zram_s4",[[:space:]]*\)".*|\1"4GB");|' \
+  -e 's|^\([[:space:]]*setvar("s_zram_s5",[[:space:]]*\)".*|\1"5GB (Above half of RAM may lag)");|' \
+  -e 's|^\([[:space:]]*setvar("s_zram_s6",[[:space:]]*\)".*|\1"6GB (Above half of RAM may lag)");|' \
+  "$cfg"
 rm -f "$Z"/META-INF/com/google/android/aroma/splash*.png "$Z"/META-INF/com/google/android/aroma/random_num.sh
 grep -q 'splash(' "$cfg" && { echo "splash lines survived" >&2; exit 1; }
 

@@ -2186,9 +2186,10 @@ static void zram_reset_device(struct zram *zram)
 }
 
 /*
- * zram may never be larger than half of physical RAM (4 GB device -> 2 GB,
- * 3 GB -> 1.5 GB, 6 GB -> 3 GB). More than that makes reclaim burn CPU
- * compressing pages and the device lags instead of getting more usable memory.
+ * The default zram size is 2 GB but never more than half of physical RAM
+ * (4 GB device -> 2 GB, 3 GB -> 1.5 GB). More than that makes reclaim burn
+ * CPU compressing pages and the device lags instead of getting more usable
+ * memory. An explicit zram.resize= on the command line overrides this limit.
  *
  * totalram_pages() excludes firmware/kernel reserved memory (a "4 GB" phone
  * reports ~3.6 GB), so round the RAM size up to whole GB before halving.
@@ -2210,17 +2211,17 @@ static ssize_t disksize_store(struct device *dev,
 	int err;
 	u32 prio;
 
-	if (zram_size != 0)
-		disksize = zram_size;
-
-	else
-		disksize = (u64)SZ_1G * 2;
-
 	max_disksize = zram_max_disksize();
-	if (disksize > max_disksize) {
-		pr_warn("zram: %llu MB is more than half of RAM, limiting to %llu MB\n",
-			disksize >> 20, max_disksize >> 20);
-		disksize = max_disksize;
+
+	if (zram_size != 0) {
+		/* Explicit zram.resize= choice (installer): honoured as given. */
+		disksize = zram_size;
+		if (disksize > max_disksize)
+			pr_warn("zram: %llu MB is more than half of RAM (%llu MB), using it because zram.resize was set\n",
+				disksize >> 20, max_disksize >> 20);
+	} else {
+		/* Default: 2 GB, but never more than half of RAM. */
+		disksize = min_t(u64, (u64)SZ_1G * 2, max_disksize);
 	}
 
 	down_write(&zram->init_lock);
